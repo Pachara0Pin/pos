@@ -272,3 +272,19 @@ button, a, .menu-tile, .cat { touch-action: manipulation; -webkit-tap-highlight-
 @media (max-width: 900px) {
   .grid-2 { grid-template-columns: 1fr; }
 }
+
+/* ---------- เครื่องพิมพ์แยกครัว ---------- */
+.krow { display: flex; align-items: center; gap: 8px; padding: 6px 0; border-bottom: 1px dashed rgba(0,0,0,.08); flex-wrap: wrap; }
+.krow:last-child { border-bottom: 0; }
+.kbadge { display: inline-block; font-size: 13px; padding: 2px 8px; border-radius: 99px; background: var(--surface-2); border: 1px solid var(--border); color: var(--muted); white-space: nowrap; }
+.kbadge.ok { background: var(--ok-soft); color: var(--ok); border-color: transparent; }
+.kbadge.warn { background: var(--danger-soft); color: var(--danger); border-color: transparent; }
+.kbadge.wait { background: #fff8e1; color: #9a6b00; border-color: transparent; }
+.station-pick { display: grid; grid-template-columns: repeat(auto-fill, minmax(180px, 1fr)); gap: 10px; }
+.station-card { display: grid; gap: 4px; text-align: left; padding: 14px; border-radius: var(--radius); border: 2px solid var(--border); background: var(--surface); }
+.station-card b { font-size: 18px; }
+.station-card.active { border-color: var(--primary); background: var(--primary-soft); }
+.station h2 { font-size: 26px; }
+.station tr.void-row td { color: var(--danger); }
+.ticket.t-cancel .t-kitchen { text-decoration: line-through; }
+.ticket .t-void.big { font-size: 24px; font-weight: 700; text-align: center; border: 2px dashed #000; margin-top: 6px; padding: 2px 0; }

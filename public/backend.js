@@ -181,8 +181,23 @@ const routes = [
     .map(({ menu_items: mi, ...k }) => ({ ...k, menu_count: mi?.length || 0 }))],
   ['POST', /^\/kitchens$/, (_, b) => run(sb.from('kitchens').insert({ name: kitchenName(b), created_at: bkkNow() }).select().single(),
     { messages: { 23505: 'มีครัวชื่อนี้แล้ว' } })],
-  ['PUT', /^\/kitchens\/(\d+)$/, ([id], b) => run(sb.from('kitchens').update({ name: kitchenName(b) }).eq('id', id).select().single(),
-    { messages: { 23505: 'มีครัวชื่อนี้แล้ว', PGRST116: 'ไม่พบครัว' } })],
+  ['PUT', /^\/kitchens\/(\d+)$/, ([id], b) => {
+    const patch = {};
+    if ('name' in b) patch.name = kitchenName(b);
+    if ('print_mode' in b) {
+      if (!['cashier', 'station'].includes(b.print_mode)) throw httpError('รูปแบบการพิมพ์ไม่ถูกต้อง');
+      patch.print_mode = b.print_mode;
+    }
+    return run(sb.from('kitchens').update(patch).eq('id', id).select().single(),
+      { messages: { 23505: 'มีครัวชื่อนี้แล้ว', PGRST116: 'ไม่พบครัว' } });
+  }],
+  // ใบงานครัว: เครื่องประจำครัว "รับ" ใบงานที่รอพิมพ์ (ส่ง order_id = เครื่องคิดเงินพิมพ์แทนเฉพาะบิลนั้น)
+  ['POST', /^\/kitchens\/(\d+)\/claim$/, ([id], b) => run(sb.rpc('claim_kitchen_tickets',
+    { p_kitchen_id: Number(id), p_order_id: b.order_id ? Number(b.order_id) : null }))],
+  ['GET', /^\/orders\/(\d+)\/tickets$/, ([id]) => read(() => sb.from('kitchen_tickets').select('*').eq('order_id', id).order('id'))],
+  ['GET', /^\/kitchens\/(\d+)\/tickets$/, async ([id]) => read(() => sb.from('kitchen_tickets')
+    .select('*, order:orders(*, items:order_items(*))').eq('kitchen_id', id)
+    .gte('created_at', new Date(Date.now() - 18 * 3600_000).toISOString()).order('id', { ascending: false }).limit(100))],
   ['DELETE', /^\/kitchens\/(\d+)$/, async ([id]) => { await run(sb.from('kitchens').delete().eq('id', id)); return { ok: true }; }],
 
   ['GET', /^\/users$/, () => read(() => sb.from('profiles').select('id, username, display_name, role, created_at').order('role').order('username'))],
@@ -221,6 +236,19 @@ function kitchenName(b) {
 function bkkNow() {
   const d = new Date(Date.now() + 7 * 3600_000); // Asia/Bangkok
   return d.toISOString().slice(0, 19).replace('T', ' ');
+}
+
+/**
+ * แจ้งเตือนทันทีเมื่อมีใบงานใหม่ของครัว (Supabase Realtime)
+ * onStatus รับ 'live' | 'offline' — เครื่องครัวยังตรวจซ้ำเป็นระยะอยู่แล้ว ถ้า realtime หลุดก็ไม่พลาดงาน
+ * คืนฟังก์ชันสำหรับเลิกฟัง
+ */
+export function watchKitchenTickets(kitchenId, onTicket, onStatus = () => {}) {
+  const channel = sb.channel(`kitchen-${kitchenId}-${Date.now()}`)
+    .on('postgres_changes', { event: 'INSERT', schema: 'public', table: 'kitchen_tickets', filter: `kitchen_id=eq.${kitchenId}` },
+      (payload) => onTicket(payload.new))
+    .subscribe((status) => onStatus(status === 'SUBSCRIBED' ? 'live' : 'offline'));
+  return () => sb.removeChannel(channel);
 }
 
 /** จุดเรียกเดียวของหน้าเว็บ: api('/menu'), api('/orders', { body }) ... */

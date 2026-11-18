@@ -1,5 +1,5 @@
 // ===== ระบบ POS ร้านอาหาร (frontend) =====
-import { backend } from './backend.js';
+import { backend, watchKitchenTickets } from './backend.js';
 
 const $app = document.getElementById('app');
 const $modal = document.getElementById('modal-root');
@@ -91,7 +91,12 @@ const ROUTES = {
   users: { label: 'บัญชีผู้ใช้', roles: ['admin'], render: renderUsers },
   accounts: { label: 'บัญชี QR', roles: ['admin'], render: renderAccounts },
   reports: { label: 'สรุปยอดขาย', roles: ['admin'], render: renderReports },
+  // จอครัว: อยู่ในแถบเมนูของ staff; admin เปิดจากหน้าต่าง "จัดการครัว" (แถบเมนู admin เต็มบน iPad แนวตั้ง)
+  station: { label: 'จอครัว', roles: ['admin', 'staff'], nav: ['staff'], render: renderStation },
 };
+// หน้าที่มีงานเบื้องหลัง (realtime, ตัวจับเวลา) ลงทะเบียนฟังก์ชันเก็บกวาดไว้ที่นี่
+let viewCleanup = null;
+const onLeaveView = (fn) => { viewCleanup = fn; };
 const currentRoute = () => {
   const r = location.hash.replace('#/', '') || 'pos';
   return ROUTES[r] && ROUTES[r].roles.includes(state.user?.role) ? r : 'pos';
@@ -100,9 +105,10 @@ window.addEventListener('hashchange', () => render());
 
 function render() {
   closeModal();
+  if (viewCleanup) { try { viewCleanup(); } catch { /* ignore */ } viewCleanup = null; }
   if (!state.user) return renderLogin();
   const route = currentRoute();
-  const links = Object.entries(ROUTES).filter(([, r]) => r.roles.includes(state.user.role))
+  const links = Object.entries(ROUTES).filter(([, r]) => (r.nav || r.roles).includes(state.user.role))
     .map(([k, r]) => `<a href="#/${k}" class="${k === route ? 'active' : ''}">${r.label}</a>`).join('');
   $app.innerHTML = `
     <header class="topbar">
@@ -415,26 +421,30 @@ function printReceipt(o) {
 
 // ---------- ใบสั่งอาหารแยกตามครัว ----------
 const NO_KITCHEN = 'ไม่ระบุครัว';
+const STATION_ONLINE_MS = 60_000; // เครื่องประจำครัวรายงานตัวทุก 15 วินาที: เกิน 1 นาทีถือว่าออฟไลน์
 
 /** จัดกลุ่มรายการในบิลตามครัว (ใช้ครัว ณ ตอนขายที่บันทึกไว้ในบิล) */
 function kitchenGroups(o) {
   const groups = new Map();
   for (const it of o.items) {
     const key = it.kitchen_name || NO_KITCHEN;
-    if (!groups.has(key)) groups.set(key, []);
-    groups.get(key).push(it);
+    if (!groups.has(key)) groups.set(key, { kitchen: key, kitchen_id: it.kitchen_id ?? null, items: [] });
+    groups.get(key).items.push(it);
   }
-  return [...groups.entries()]
-    .sort(([a], [b]) => (a === NO_KITCHEN) - (b === NO_KITCHEN) || a.localeCompare(b, 'th'))
-    .map(([kitchen, items]) => ({ kitchen, items, qty: items.reduce((s, i) => s + i.qty, 0) }));
+  return [...groups.values()]
+    .sort((a, b) => (a.kitchen === NO_KITCHEN) - (b.kitchen === NO_KITCHEN) || a.kitchen.localeCompare(b.kitchen, 'th'))
+    .map((g) => ({ ...g, qty: g.items.reduce((s, i) => s + i.qty, 0) }));
 }
 
-function kitchenTicketHTML(o, g, index, count) {
-  return `<div class="ticket">
+/** ใบสั่งอาหาร 1 ครัว — kind 'void' = ใบแจ้งยกเลิก */
+function kitchenTicketHTML(o, g, { index, count, kind = 'order' } = {}) {
+  const isVoid = kind === 'void' || (kind === 'order' && o.status === 'void');
+  return `<div class="ticket ${kind === 'void' ? 't-cancel' : ''}">
     <div class="t-kitchen">${esc(g.kitchen)}</div>
+    ${kind === 'void' ? '<div class="t-void big">✕ ยกเลิก ✕</div>' : ''}
     <div class="t-type">${o.order_type === 'takeaway' ? '🛍 กลับบ้าน' : '🍽 ทานที่ร้าน'}${o.table_no ? ' · โต๊ะ ' + esc(o.table_no) : ''}</div>
-    <div class="t-meta"><span>บิล ${esc(o.order_no.slice(-4))}</span><span>${esc(o.created_at.slice(11, 16))}</span><span>ใบ ${index + 1}/${count}</span></div>
-    ${o.status === 'void' ? '<div class="t-void">*** ยกเลิกบิล ***</div>' : ''}
+    <div class="t-meta"><span>บิล ${esc(o.order_no.slice(-4))}</span><span>${esc(o.created_at.slice(11, 16))}</span>${count ? `<span>ใบ ${index + 1}/${count}</span>` : ''}</div>
+    ${isVoid && kind !== 'void' ? '<div class="t-void">*** ยกเลิกบิล ***</div>' : ''}
     <hr>
     ${g.items.map((i) => `<div class="t-line"><span class="t-qty">${i.qty}</span><span class="t-name">${esc(i.name)}${i.note ? `<span class="t-note">» ${esc(i.note)}</span>` : ''}</span></div>`).join('')}
     <hr>
@@ -442,13 +452,26 @@ function kitchenTicketHTML(o, g, index, count) {
   </div>`;
 }
 
-function printKitchenTickets(o, onlyKitchen) {
-  const groups = kitchenGroups(o);
-  const html = groups
-    .map((g, i) => (onlyKitchen && g.kitchen !== onlyKitchen ? '' : kitchenTicketHTML(o, g, i, groups.length)))
-    .join('');
+function printHTML(html) {
   document.getElementById('print-area').innerHTML = html;
   window.print();
+}
+
+/** พิมพ์ใบสั่งที่เครื่องนี้ — only: ชื่อครัวที่ต้องการ (ไม่ใส่ = ทุกครัว) */
+function printKitchenTickets(o, only) {
+  const groups = kitchenGroups(o);
+  const pick = only ? groups.filter((g) => only.includes(g.kitchen)) : groups;
+  if (!pick.length) return;
+  printHTML(pick.map((g) => kitchenTicketHTML(o, g, { index: groups.indexOf(g), count: groups.length })).join(''));
+}
+
+/** แปลงใบงานที่เครื่องครัวรับมา (จาก claim) เป็น HTML พิมพ์ */
+function claimedTicketsHTML(tickets) {
+  return tickets.map((t) => {
+    const o = t.order;
+    const items = o.items.filter((i) => i.kitchen_id === t.kitchen_id);
+    return kitchenTicketHTML(o, { kitchen: t.kitchen_name, items, qty: items.reduce((s, i) => s + i.qty, 0) }, { kind: t.kind });
+  }).join('');
 }
 
 // ตั้งค่าเฉพาะเครื่อง: พิมพ์ใบสั่งครัวอัตโนมัติหลังคิดเงิน (ค่าเริ่มต้น: เปิด)
@@ -460,25 +483,259 @@ const autoKitchenPrint = {
 
 function receiptModal(o, { fresh = true } = {}) {
   const groups = kitchenGroups(o);
+  // สถานะแต่ละครัว: cashier = พิมพ์ที่เครื่องนี้, station = ส่งไปเครื่องประจำครัว
+  const status = Object.fromEntries(groups.map((g) => [g.kitchen, { mode: 'cashier' }]));
+  let pollTimer = null;
+  const started = Date.now();
+
+  const rowHTML = (g) => {
+    const st = status[g.kitchen];
+    let badge = '<span class="kbadge">พิมพ์ที่เครื่องนี้</span>';
+    if (st.mode === 'station') {
+      badge = st.printed ? '<span class="kbadge ok">✓ เครื่องครัวพิมพ์แล้ว</span>'
+        : st.offline ? '<span class="kbadge warn">⚠ เครื่องครัวออฟไลน์</span>'
+        : Date.now() - started > 15000 ? '<span class="kbadge warn">⚠ เครื่องครัวยังไม่รับ</span>'
+        : '<span class="kbadge wait">⏳ ส่งไปเครื่องครัว…</span>';
+    }
+    const needFallback = st.mode === 'station' && !st.printed && (st.offline || Date.now() - started > 15000);
+    return `<div class="krow"><b>${esc(g.kitchen)}</b><span class="muted">· ${g.qty}</span><span class="spacer"></span>${badge}
+      <button class="btn sm ${needFallback ? 'primary' : ''}" data-kprint="${esc(g.kitchen)}">${needFallback ? '🖨 พิมพ์ที่นี่แทน' : '🖨'}</button></div>`;
+  };
+
   openModal(`${fresh ? `<h3 style="color:var(--ok)">✓ ชำระเงินสำเร็จ</h3>` : `<h3>บิล ${esc(o.order_no)}</h3>`}
     ${fresh && o.payment_method === 'cash' ? `<div class="change-box">เงินทอน ${baht(o.change_amount)}</div>` : ''}
     <div class="kitchen-box">
       <div class="row"><b>ใบสั่งอาหาร (${groups.length} ครัว)</b><span class="spacer"></span>
-        <button class="btn primary" id="k-print-all">🖨 พิมพ์ใบสั่งครัว</button></div>
-      <div class="kitchen-chips">${groups.map((g) => `<button class="btn sm" data-kprint="${esc(g.kitchen)}" title="พิมพ์เฉพาะ ${esc(g.kitchen)}">
-        ${esc(g.kitchen)} <span class="muted">· ${g.qty}</span></button>`).join('')}</div>
+        <button class="btn" id="k-print-all" title="พิมพ์ทุกครัวที่เครื่องนี้">🖨 พิมพ์ทั้งหมดที่นี่</button></div>
+      <div id="k-rows">${groups.map(rowHTML).join('')}</div>
       <label class="row muted" style="font-size:14px"><input type="checkbox" id="k-auto" ${autoKitchenPrint.get() ? 'checked' : ''}> พิมพ์ใบสั่งครัวอัตโนมัติหลังคิดเงิน (เครื่องนี้)</label>
     </div>
     <details><summary class="muted">ดูใบเสร็จ</summary>${receiptHTML(o)}</details>
     <div class="row"><button class="btn" id="r-print">🖨 พิมพ์ใบเสร็จ</button><span class="spacer"></span><button class="btn primary" data-close>${fresh ? 'บิลถัดไป' : 'ปิด'}</button></div>`,
-  { onMount: (m) => {
-    m.querySelector('#r-print').onclick = () => printReceipt(o);
-    m.querySelector('#k-print-all').onclick = () => printKitchenTickets(o);
-    m.querySelectorAll('[data-kprint]').forEach((b) => (b.onclick = () => printKitchenTickets(o, b.dataset.kprint)));
-    m.querySelector('#k-auto').onchange = (e) => autoKitchenPrint.set(e.target.checked);
-    // ออกใบสั่งครัวทันทีหลังคิดเงิน (ถ้าเบราว์เซอร์ไม่เปิดหน้าพิมพ์เอง ให้กดปุ่มด้านบน)
-    if (fresh && autoKitchenPrint.get()) setTimeout(() => printKitchenTickets(o), 300);
-  } });
+  {
+    onClose: () => clearTimeout(pollTimer),
+    onMount: async (m) => {
+      const draw = () => {
+        const box = m.querySelector('#k-rows');
+        if (!box) return;
+        box.innerHTML = groups.map(rowHTML).join('');
+        box.querySelectorAll('[data-kprint]').forEach((b) => (b.onclick = () => printOne(b.dataset.kprint)));
+      };
+      // พิมพ์ครัวเดียวที่เครื่องนี้: ถ้าเป็นครัวที่มีเครื่องประจำครัวและยังไม่พิมพ์ "รับงาน" ก่อน กันพิมพ์ซ้ำสองที่
+      const printOne = async (kitchen) => {
+        const g = groups.find((x) => x.kitchen === kitchen);
+        const st = status[kitchen];
+        if (st.mode === 'station' && !st.printed && g.kitchen_id) {
+          try {
+            const claimed = await api(`/kitchens/${g.kitchen_id}/claim`, { body: { order_id: o.id } });
+            st.printed = true;
+            if (!claimed.length) { toast('เครื่องครัวพิมพ์ใบนี้ไปแล้ว — พิมพ์ซ้ำที่นี่'); }
+            draw();
+          } catch (e) { fail(e); }
+        }
+        printKitchenTickets(o, [kitchen]);
+      };
+      m.querySelector('#r-print').onclick = () => printReceipt(o);
+      m.querySelector('#k-print-all').onclick = () => printKitchenTickets(o);
+      m.querySelector('#k-auto').onchange = (e) => autoKitchenPrint.set(e.target.checked);
+      draw();
+
+      // ดูว่าครัวไหนส่งไปเครื่องประจำครัว (มีใบงานในคิว) แล้วติดตามสถานะ
+      try {
+        const [tickets, kitchens] = await Promise.all([api(`/orders/${o.id}/tickets`), api('/kitchens')]);
+        const seen = Object.fromEntries(kitchens.map((k) => [k.id, k.station_seen_at ? Date.parse(k.station_seen_at) : 0]));
+        for (const t of tickets.filter((x) => x.kind === 'order')) {
+          const g = groups.find((x) => x.kitchen_id === t.kitchen_id);
+          if (!g) continue;
+          status[g.kitchen] = { mode: 'station', printed: t.status === 'printed', offline: Date.now() - (seen[t.kitchen_id] || 0) > STATION_ONLINE_MS };
+        }
+      } catch { /* ดูสถานะไม่ได้: ถือว่าพิมพ์ที่เครื่องนี้ทั้งหมด */ }
+      draw();
+
+      // พิมพ์อัตโนมัติเฉพาะครัวที่พิมพ์ที่เครื่องคิดเงิน
+      const local = groups.filter((g) => status[g.kitchen].mode === 'cashier').map((g) => g.kitchen);
+      if (fresh && autoKitchenPrint.get() && local.length) setTimeout(() => printKitchenTickets(o, local), 300);
+
+      const poll = async () => {
+        if (!m.isConnected) return;
+        const waiting = groups.filter((g) => status[g.kitchen].mode === 'station' && !status[g.kitchen].printed);
+        if (!waiting.length || Date.now() - started > 120000) return draw();
+        try {
+          const tickets = await api(`/orders/${o.id}/tickets`);
+          for (const t of tickets) {
+            const g = groups.find((x) => x.kitchen_id === t.kitchen_id);
+            if (g && t.kind === 'order' && t.status === 'printed') status[g.kitchen].printed = true;
+          }
+        } catch { /* ลองใหม่รอบหน้า */ }
+        draw();
+        pollTimer = setTimeout(poll, 2000);
+      };
+      if (groups.some((g) => status[g.kitchen].mode === 'station')) pollTimer = setTimeout(poll, 1500);
+    },
+  });
+}
+
+// ---------- จอครัว / เครื่องพิมพ์ประจำครัว ----------
+const STATION_KEY = 'pos.stationKitchen';
+const stationPref = {
+  get() { try { return Number(localStorage.getItem(STATION_KEY)) || null; } catch { return null; } },
+  set(id) { try { id ? localStorage.setItem(STATION_KEY, String(id)) : localStorage.removeItem(STATION_KEY); } catch { /* ignore */ } },
+};
+
+function beep() {
+  try {
+    const ctx = beep.ctx || (beep.ctx = new (window.AudioContext || window.webkitAudioContext)());
+    [0, 0.25].forEach((t) => {
+      const osc = ctx.createOscillator(); const gain = ctx.createGain();
+      osc.frequency.value = 880; gain.gain.value = 0.25;
+      osc.connect(gain).connect(ctx.destination);
+      osc.start(ctx.currentTime + t); osc.stop(ctx.currentTime + t + 0.15);
+    });
+  } catch { /* ไม่มีเสียงก็ยังพิมพ์ได้ */ }
+}
+
+async function renderStation(view) {
+  let kitchens = [];
+  try { kitchens = await api('/kitchens'); } catch (e) { fail(e); }
+  const isAdmin = state.user.role === 'admin';
+  const chosen = kitchens.find((k) => k.id === stationPref.get());
+
+  // ---- เลือกครัว ----
+  if (!chosen || chosen.print_mode !== 'station' || !view.dataset.started) {
+    view.innerHTML = `<div class="page">
+      <div class="page-head"><h2>จอครัว / เครื่องพิมพ์ประจำครัว</h2></div>
+      <div class="card form-grid">
+        <div class="muted">ตั้งเครื่องนี้ (iPad / แท็บเล็ต / คอม ที่ต่อเครื่องพิมพ์ของครัว) ให้รับและพิมพ์ใบสั่งอาหารของครัวที่เลือกอัตโนมัติ — เปิดหน้านี้ค้างไว้</div>
+        ${kitchens.length ? `<div class="station-pick">${kitchens.map((k) => `<button class="station-card ${k.id === chosen?.id ? 'active' : ''}" data-k="${k.id}">
+            <b>${esc(k.name)}</b><span class="muted">${k.print_mode === 'station' ? 'เครื่องประจำครัว' : 'พิมพ์ที่เครื่องคิดเงิน'}</span></button>`).join('')}</div>`
+          : '<div class="muted">ยังไม่มีครัว — ให้ Admin เพิ่มที่ จัดการเมนู → จัดการครัว</div>'}
+        <div id="st-note"></div>
+        <div class="row"><span class="spacer"></span><button class="btn primary lg" id="st-start" ${chosen ? '' : 'disabled'}>▶ เริ่มรับออเดอร์</button></div>
+      </div></div>`;
+    let pick = chosen;
+    const note = () => {
+      const n = view.querySelector('#st-note');
+      if (pick && pick.print_mode !== 'station') {
+        n.innerHTML = `<div class="kbadge warn" style="display:block;padding:10px">"${esc(pick.name)}" ตั้งให้พิมพ์ที่เครื่องคิดเงินอยู่
+          ${isAdmin ? ' — <button class="btn sm" id="st-switch">เปลี่ยนเป็นเครื่องประจำครัว</button>' : ' — ให้ Admin เปลี่ยนเป็น "เครื่องประจำครัว" ก่อน'}</div>`;
+        n.querySelector('#st-switch')?.addEventListener('click', async () => {
+          try { await api(`/kitchens/${pick.id}`, { method: 'PUT', body: { print_mode: 'station' } }); pick.print_mode = 'station'; toast(`${pick.name}: ใช้เครื่องประจำครัวแล้ว`); note(); }
+          catch (e) { fail(e); }
+        });
+      } else n.innerHTML = '';
+      view.querySelector('#st-start').disabled = !pick || pick.print_mode !== 'station';
+    };
+    view.querySelectorAll('[data-k]').forEach((b) => (b.onclick = () => {
+      pick = kitchens.find((k) => k.id === Number(b.dataset.k));
+      view.querySelectorAll('[data-k]').forEach((x) => x.classList.toggle('active', x === b));
+      note();
+    }));
+    note();
+    view.querySelector('#st-start').onclick = () => {
+      stationPref.set(pick.id);
+      beep(); // กดปุ่มครั้งแรกเพื่อให้ iPad อนุญาตเล่นเสียง
+      view.dataset.started = '1';
+      renderStation(view);
+    };
+    return;
+  }
+
+  // ---- กำลังทำงาน ----
+  const k = chosen;
+  view.innerHTML = `<div class="page station">
+    <div class="page-head">
+      <h2>🍳 ${esc(k.name)}</h2>
+      <span class="kbadge" id="st-live">กำลังเชื่อมต่อ…</span>
+      <span class="spacer"></span>
+      <button class="btn" id="st-test">🖨 ทดสอบพิมพ์</button>
+      <button class="btn" id="st-change">เปลี่ยนครัว</button>
+    </div>
+    <div class="muted" style="margin:-6px 0 12px;font-size:14px" id="st-info">ใบสั่งใหม่จะพิมพ์อัตโนมัติ · เปิดหน้านี้ค้างไว้</div>
+    <div class="card table-wrap" id="st-list"><div class="muted">กำลังโหลด...</div></div>
+  </div>`;
+
+  let stopped = false;
+  let timer = null;
+  let busy = false;
+  let wakeLock = null;
+  const liveEl = view.querySelector('#st-live');
+  const setLive = (s) => {
+    liveEl.className = 'kbadge ' + (s === 'live' ? 'ok' : 'warn');
+    liveEl.textContent = s === 'live' ? '● ออนไลน์' : '● เชื่อมต่อใหม่… (ยังตรวจทุก 15 วินาที)';
+  };
+
+  const drawList = async () => {
+    try {
+      const rows = await api(`/kitchens/${k.id}/tickets`);
+      const list = view.querySelector('#st-list');
+      if (!list) return;
+      list.innerHTML = rows.length ? `<table><thead><tr><th>เวลา</th><th>บิล</th><th>ประเภท</th><th>รายการ</th><th>สถานะ</th><th></th></tr></thead><tbody>
+        ${rows.map((t) => {
+          const items = (t.order?.items || []).filter((i) => i.kitchen_id === t.kitchen_id);
+          return `<tr class="${t.kind === 'void' ? 'void-row' : ''}">
+            <td>${new Date(t.created_at).toLocaleTimeString('th-TH', { hour: '2-digit', minute: '2-digit' })}</td>
+            <td>${esc(t.order?.order_no.slice(-4) || '')}</td>
+            <td>${t.kind === 'void' ? '<b>✕ ยกเลิก</b>' : (t.order?.order_type === 'takeaway' ? 'กลับบ้าน' : 'ทานที่ร้าน')}${t.order?.table_no ? ' · โต๊ะ ' + esc(t.order.table_no) : ''}</td>
+            <td>${items.map((i) => `${i.qty}× ${esc(i.name)}${i.note ? ` <span class="muted">(${esc(i.note)})</span>` : ''}`).join('<br>')}</td>
+            <td>${t.status === 'printed' ? `<span class="kbadge ok">พิมพ์แล้ว</span><div class="muted" style="font-size:12px">${esc(t.printed_by || '')}</div>` : '<span class="kbadge wait">รอพิมพ์</span>'}</td>
+            <td><button class="btn sm" data-reprint="${t.id}">🖨 ซ้ำ</button></td></tr>`;
+        }).join('')}</tbody></table>` : '<div class="muted">ยังไม่มีใบสั่งวันนี้</div>';
+      list.querySelectorAll('[data-reprint]').forEach((b) => (b.onclick = () => {
+        const t = rows.find((x) => x.id === Number(b.dataset.reprint));
+        printHTML(claimedTicketsHTML([t]));
+      }));
+    } catch { /* แสดงรายการไม่ได้ชั่วคราว */ }
+  };
+
+  // รับงานที่รอพิมพ์ทั้งหมดของครัว แล้วพิมพ์รวดเดียว (1 ใบต่อบิล ขึ้นหน้าใหม่ทุกใบ)
+  const claim = async () => {
+    if (stopped || busy) return;
+    busy = true;
+    try {
+      const tickets = await api(`/kitchens/${k.id}/claim`, { method: 'POST', body: {} });
+      view.querySelector('#st-info').textContent = `ตรวจล่าสุด ${new Date().toLocaleTimeString('th-TH')} · ใบสั่งใหม่จะพิมพ์อัตโนมัติ`;
+      if (tickets.length) {
+        beep();
+        printHTML(claimedTicketsHTML(tickets));
+        drawList();
+      }
+    } catch (e) {
+      view.querySelector('#st-info').textContent = `⚠ เชื่อมต่อไม่ได้ (${e.message}) — จะลองใหม่อัตโนมัติ`;
+    } finally {
+      busy = false;
+    }
+  };
+
+  const loop = async () => {
+    await claim();
+    if (!stopped) timer = setTimeout(loop, 15000);
+  };
+
+  // realtime: มีใบงานใหม่ → รับทันที (ถ้า realtime หลุด ยังมีรอบตรวจทุก 15 วินาที)
+  const unwatch = watchKitchenTickets(k.id, () => claim(), setLive);
+
+  // กันหน้าจอดับ (ถ้าเบราว์เซอร์รองรับ)
+  const lock = async () => { try { wakeLock = await navigator.wakeLock?.request('screen'); } catch { /* ไม่รองรับ */ } };
+  const onVisible = () => { if (document.visibilityState === 'visible') { lock(); claim(); } };
+  document.addEventListener('visibilitychange', onVisible);
+  lock();
+
+  onLeaveView(() => {
+    stopped = true;
+    clearTimeout(timer);
+    unwatch();
+    document.removeEventListener('visibilitychange', onVisible);
+    wakeLock?.release?.().catch(() => {});
+    delete view.dataset.started;
+  });
+
+  view.querySelector('#st-change').onclick = () => { stationPref.set(null); render(); };
+  view.querySelector('#st-test').onclick = () => printHTML(kitchenTicketHTML(
+    { order_type: 'dine_in', table_no: 'ทดสอบ', order_no: '0000', created_at: '0000-00-00 ' + new Date().toTimeString().slice(0, 5), staff_name: 'ทดสอบเครื่องพิมพ์' },
+    { kitchen: k.name, items: [{ qty: 1, name: 'ทดสอบการพิมพ์', note: 'ถ้าเห็นใบนี้ เครื่องพิมพ์พร้อมแล้ว' }], qty: 1 }));
+
+  drawList();
+  loop();
 }
 
 // ---------- orders today ----------
@@ -600,9 +857,15 @@ function menuForm(item) {
 function kitchensModal() {
   const draw = (m) => {
     const box = m.querySelector('#k-list');
-    box.innerHTML = state.kitchens.length ? `<table><tbody>${state.kitchens.map((k) => `<tr>
-        <td><input class="input" value="${esc(k.name)}" data-kname="${k.id}" maxlength="50" aria-label="ชื่อครัว"></td>
-        <td class="muted" style="white-space:nowrap">${k.menu_count} เมนู</td>
+    const online = (k) => k.station_seen_at && Date.now() - Date.parse(k.station_seen_at) < STATION_ONLINE_MS;
+    box.innerHTML = state.kitchens.length ? `<table><thead><tr><th>ครัว</th><th>พิมพ์ใบสั่งที่</th><th></th></tr></thead><tbody>${state.kitchens.map((k) => `<tr>
+        <td><input class="input" value="${esc(k.name)}" data-kname="${k.id}" maxlength="50" aria-label="ชื่อครัว">
+          <div class="muted" style="font-size:12px;margin-top:2px">${k.menu_count} เมนู</div></td>
+        <td><select class="input" data-kmode="${k.id}" aria-label="พิมพ์ใบสั่งของ ${esc(k.name)}">
+            <option value="cashier" ${k.print_mode !== 'station' ? 'selected' : ''}>เครื่องคิดเงิน</option>
+            <option value="station" ${k.print_mode === 'station' ? 'selected' : ''}>เครื่องประจำครัว</option></select>
+          ${k.print_mode === 'station' ? `<div style="font-size:12px;margin-top:2px">${online(k) ? '<span class="kbadge ok">● ออนไลน์</span>'
+            : `<span class="kbadge warn">● ออฟไลน์${k.station_seen_at ? ' · ล่าสุด ' + new Date(k.station_seen_at).toLocaleTimeString('th-TH', { hour: '2-digit', minute: '2-digit' }) : ''}</span>`}</div>` : ''}</td>
         <td><button class="btn sm danger" data-kdel="${k.id}">ลบ</button></td></tr>`).join('')}</tbody></table>`
       : '<div class="muted">ยังไม่มีครัว — เพิ่มด้านล่าง เช่น "ครัว 1", "ครัวเครื่องดื่ม"</div>';
     box.querySelectorAll('[data-kname]').forEach((inp) => {
@@ -613,6 +876,15 @@ function kitchensModal() {
         catch (e) { fail(e); inp.value = k.name; }
       };
     });
+    box.querySelectorAll('[data-kmode]').forEach((sel) => (sel.onchange = async () => {
+      const k = state.kitchens.find((x) => x.id === Number(sel.dataset.kmode));
+      try {
+        const saved = await api('/kitchens/' + k.id, { method: 'PUT', body: { print_mode: sel.value } });
+        Object.assign(k, saved);
+        toast(saved.print_mode === 'station' ? `${k.name}: พิมพ์ที่เครื่องประจำครัว — เปิด "จอครัว" ที่เครื่องของครัวนี้` : `${k.name}: พิมพ์ที่เครื่องคิดเงิน`);
+        draw(m);
+      } catch (e) { fail(e); sel.value = k.print_mode; }
+    }));
     box.querySelectorAll('[data-kdel]').forEach((b) => (b.onclick = async () => {
       const k = state.kitchens.find((x) => x.id === Number(b.dataset.kdel));
       const msg = k.menu_count ? `ลบ "${k.name}"? เมนู ${k.menu_count} รายการในครัวนี้จะกลายเป็น "ไม่ระบุครัว"` : `ลบ "${k.name}"?`;
@@ -622,13 +894,15 @@ function kitchensModal() {
     }));
   };
   openModal(`<h3>จัดการครัว</h3>
-    <div class="muted" style="font-size:14px">หลังคิดเงิน ระบบจะออกใบสั่งอาหารแยกตามครัวของแต่ละเมนู</div>
+    <div class="muted" style="font-size:14px">หลังคิดเงิน ระบบจะออกใบสั่งอาหารแยกตามครัวของแต่ละเมนู
+      <br><b>เครื่องคิดเงิน</b> = พิมพ์ที่ iPad ที่คิดเงิน · <b>เครื่องประจำครัว</b> = ส่งไปพิมพ์ที่อุปกรณ์ของครัวนั้น (เปิดหน้า "จอครัว" ค้างไว้)</div>
     <div class="table-wrap" id="k-list"></div>
     <form class="row" id="k-add" style="flex-wrap:nowrap"><input class="input" name="name" placeholder="ชื่อครัวใหม่ เช่น ครัว 1" maxlength="50" required>
       <button class="btn primary" style="white-space:nowrap">+ เพิ่มครัว</button></form>
-    <div class="row"><span class="spacer"></span><button class="btn" data-close>เสร็จ</button></div>`, {
+    <div class="row"><button class="btn" id="k-station" type="button">🖨 ใช้เครื่องนี้เป็นจอครัว</button><span class="spacer"></span><button class="btn" data-close>เสร็จ</button></div>`, {
     onMount: (m) => {
       draw(m);
+      m.querySelector('#k-station').onclick = () => { modalOnClose = null; location.hash = '#/station'; };
       m.querySelector('#k-add').onsubmit = async (e) => {
         e.preventDefault();
         try {
