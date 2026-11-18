@@ -1,17 +1,48 @@
 # ระบบ POS ร้านอาหาร
 
-Webapp ขายหน้าร้าน: Node.js + Express + SQLite (ในตัว Node) — ไม่ต้องติดตั้งฐานข้อมูลแยก
+Webapp ขายหน้าร้าน: Node.js + Express + PostgreSQL บน [Supabase](https://supabase.com)
 
 ## เริ่มใช้งาน
 
 ต้องใช้ Node.js 22.13 ขึ้นไป
 
+1. สร้างโปรเจกต์ Supabase (แนะนำ Region: Southeast Asia (Singapore))
+2. กดปุ่ม **Connect** → คัดลอก connection string แบบ **Session pooler** (อย่าใช้ Direct connection — ใช้ได้เฉพาะเน็ตที่รองรับ IPv6)
+3. คัดลอก `.env.example` เป็น `.env` แล้วใส่ `DATABASE_URL` (แทน `[YOUR-PASSWORD]` ด้วยรหัสฐานข้อมูล)
+4. (แนะนำ) ดาวน์โหลดใบรับรองที่ Project Settings → Database → SSL Configuration ไว้ที่ `certs/` แล้วตั้ง `DATABASE_CA_CERT` เพื่อให้ตรวจสอบเซิร์ฟเวอร์ได้เต็มรูปแบบ
+5. รัน
+
 ```bash
 npm install
-npm start
+node server.js
 ```
 
-เปิด http://localhost:3000
+เปิด http://localhost:3000 — ตารางถูกสร้างอัตโนมัติตอนรันครั้งแรก
+
+### ย้ายข้อมูลจากเวอร์ชัน SQLite เดิม
+
+ถ้ามีข้อมูลเก่าใน `data/pos.db` ให้รัน **ก่อน** เปิดเซิร์ฟเวอร์ครั้งแรก:
+
+```bash
+node scripts/migrate-sqlite.js
+```
+
+ถ้าเปิดเซิร์ฟเวอร์ไปแล้ว (มีข้อมูลตัวอย่างใน Supabase) ใช้ `--replace` เพื่อลบข้อมูลใน Supabase แล้วแทนที่ด้วยข้อมูลเดิม
+
+### ตรวจการเชื่อมต่อ
+
+```bash
+node scripts/db-check.js
+```
+
+ส่งคำสั่งทดสอบ 100 ครั้ง + เปิด connection ใหม่ 10 ครั้ง แล้วรายงานความเร็วและจำนวนที่หลุด (Singapore ปกติ median ~40 ms)
+
+### เมื่อเน็ตสะดุด
+
+- อ่านข้อมูล (เมนู, บิล, รายงาน) ลองใหม่อัตโนมัติ
+- กดชำระเงิน: ทุกบิลมีรหัสคำขอ ถ้าเน็ตหลุดระบบจะลองใหม่เองด้วยรหัสเดิม — กดซ้ำกี่ครั้งก็ได้บิลเดียว ไม่เกิดบิลซ้ำ
+- ถ้าลองใหม่แล้วยังไม่ได้ จะขึ้นข้อความให้กดยืนยันอีกครั้ง (ยังปลอดภัย ไม่เกิดบิลซ้ำ)
+- ถ้าเน็ตล่มทั้งหมด จะขายไม่ได้จนกว่าเน็ตกลับมา
 
 บัญชีเริ่มต้น (สร้างอัตโนมัติครั้งแรก — **เปลี่ยนรหัสผ่านทันที**):
 
@@ -20,7 +51,9 @@ npm start
 | admin | admin123 | Admin |
 | staff | staff123 | Staff |
 
-ข้อมูลทั้งหมดเก็บที่โฟลเดอร์ `data/` (สำรองทั้งโฟลเดอร์)
+ข้อมูลทั้งหมดอยู่ใน Supabase (ดูตารางได้ที่ Table Editor) — ตารางทั้งหมดเปิด Row Level Security ไว้ จึงอ่านผ่าน Supabase API ด้วย anon key ไม่ได้ เข้าถึงได้ผ่านเซิร์ฟเวอร์นี้เท่านั้น
+
+> แผนฟรีของ Supabase จะ **หยุดโปรเจกต์ชั่วคราว** ถ้าไม่มีการใช้งาน 7 วัน (กด Restore ในหน้า Dashboard ได้) และไม่มี backup อัตโนมัติ — ควร export ข้อมูลเป็นระยะ
 
 ## ใช้บน iPad
 
@@ -51,7 +84,13 @@ npm start
 
 ## ตั้งค่า
 
+ตั้งในไฟล์ `.env`:
+
+- `DATABASE_URL` — connection string ของ Supabase (จำเป็น)
+- `DATABASE_CA_CERT` — path ไฟล์ใบรับรอง CA ของ Supabase (แนะนำ)
+- `DATABASE_POOL_SIZE` — จำนวน connection สูงสุด (ค่าเริ่มต้น 5)
 - `PORT` — พอร์ต (ค่าเริ่มต้น 3000)
 - `TZ` — เขตเวลา (ค่าเริ่มต้น Asia/Bangkok)
+- `TRUST_PROXY=1` — ตั้งเมื่อวางหลัง reverse proxy ที่ทำ HTTPS (cookie จะเป็น Secure)
 
 > ถ้าเปิดให้เครื่องอื่นใช้งานผ่านอินเทอร์เน็ต ควรวางหลัง HTTPS (เช่น Nginx/Cloudflare)

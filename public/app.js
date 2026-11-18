@@ -24,16 +24,37 @@ const ORDER_TYPE = { dine_in: 'ทานที่ร้าน', takeaway: 'ก�
 const PAY = { cash: 'เงินสด', qr: 'สแกน QR' };
 
 async function api(path, opts = {}) {
-  const res = await fetch('/api' + path, {
-    method: opts.method || (opts.body ? 'POST' : 'GET'),
-    headers: opts.body ? { 'Content-Type': 'application/json' } : {},
-    body: opts.body ? JSON.stringify(opts.body) : undefined,
-  });
+  const ctrl = new AbortController();
+  const timer = setTimeout(() => ctrl.abort(), opts.timeout || 30000);
+  let res;
+  try {
+    res = await fetch('/api' + path, {
+      method: opts.method || (opts.body ? 'POST' : 'GET'),
+      headers: opts.body ? { 'Content-Type': 'application/json' } : {},
+      body: opts.body ? JSON.stringify(opts.body) : undefined,
+      signal: ctrl.signal,
+    });
+  } catch {
+    const err = new Error('เชื่อมต่อเซิร์ฟเวอร์ไม่ได้ ตรวจสอบ Wi-Fi');
+    err.retryable = true;
+    throw err;
+  } finally {
+    clearTimeout(timer);
+  }
   const data = await res.json().catch(() => ({}));
   if (res.status === 401 && path !== '/login') { state.user = null; render(); }
-  if (!res.ok) throw new Error(data.error || 'เกิดข้อผิดพลาด');
+  if (!res.ok) {
+    const err = new Error(data.error || 'เกิดข้อผิดพลาด');
+    err.status = res.status;
+    err.retryable = [502, 503, 504].includes(res.status);
+    throw err;
+  }
   return data;
 }
+
+const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
+// ไม่ใช้ crypto.randomUUID เพราะใช้ไม่ได้บนหน้า http:// (iPad เปิดผ่าน IP ในร้าน)
+const newRequestId = () => Array.from(crypto.getRandomValues(new Uint8Array(16)), (b) => b.toString(16).padStart(2, '0')).join('');
 
 let toastTimer;
 function toast(msg, isErr = false) {
@@ -287,13 +308,39 @@ function orderPayload(extra) {
   };
 }
 
+// รหัสคำขอผูกกับรายการในบิล: ส่งซ้ำ/ลองใหม่ด้วยรายการเดิม จะได้บิลเดิมจากเซิร์ฟเวอร์ ไม่เกิดบิลซ้ำ
+// ถ้าแก้รายการ (เพิ่ม/ลด/ส่วนลด/โต๊ะ) จะได้รหัสใหม่
+let checkout = null;
+function checkoutRequestId(payload) {
+  const key = JSON.stringify([payload.items, payload.order_type, payload.table_no, payload.discount]);
+  if (!checkout || checkout.key !== key) checkout = { key, id: newRequestId() };
+  return checkout.id;
+}
+
 async function submitOrder(extra, btn) {
   btn.disabled = true;
-  try {
-    const order = await api('/orders', { body: orderPayload(extra) });
-    resetCart();
-    receiptModal(order);
-  } catch (e) { fail(e); btn.disabled = false; }
+  const label = btn.textContent;
+  const payload = orderPayload(extra);
+  payload.request_id = checkoutRequestId(payload);
+  for (let attempt = 0; ; attempt++) {
+    try {
+      const order = await api('/orders', { body: payload, timeout: 45000 });
+      checkout = null;
+      resetCart();
+      receiptModal(order);
+      return;
+    } catch (e) {
+      if (e.retryable && attempt < 2) {
+        btn.textContent = 'เน็ตสะดุด กำลังลองใหม่...';
+        await sleep(1500);
+        continue;
+      }
+      btn.textContent = label;
+      btn.disabled = false;
+      fail(e.retryable ? new Error('บันทึกบิลไม่สำเร็จเพราะเน็ตมีปัญหา — กดยืนยันอีกครั้งได้ จะไม่เกิดบิลซ้ำ') : e);
+      return;
+    }
+  }
 }
 
 function cashModal() {
