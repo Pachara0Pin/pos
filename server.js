@@ -3,6 +3,7 @@ import express from 'express';
 import QRCode from 'qrcode';
 import { randomBytes } from 'node:crypto';
 import { fileURLToPath } from 'node:url';
+import { networkInterfaces } from 'node:os';
 import { db, nowLocal, hashPassword, verifyPassword } from './db.js';
 import { promptPayPayload, normalizePromptPayId } from './promptpay.js';
 
@@ -341,4 +342,11 @@ app.use((err, _req, res, _next) => {
   res.status(status).json({ error: status === 500 ? 'เกิดข้อผิดพลาดในระบบ' : status === 413 ? 'ไฟล์ใหญ่เกินไป' : err.message });
 });
 
-app.listen(PORT, () => console.log(`POS พร้อมใช้งานที่ http://localhost:${PORT}`));
+app.listen(PORT, () => {
+  console.log(`POS พร้อมใช้งานที่ http://localhost:${PORT}`);
+  // แสดงที่อยู่ในวง Wi-Fi สำหรับเปิดจาก iPad / มือถือ
+  const lan = Object.values(networkInterfaces()).flat()
+    .filter((n) => n && n.family === 'IPv4' && !n.internal)
+    .map((n) => `http://${n.address}:${PORT}`);
+  if (lan.length) console.log(`เปิดจาก iPad (Wi-Fi เดียวกัน): ${lan.join('  ')}`);
+});

@@ -197,12 +197,54 @@ tr.void td { color: var(--muted); text-decoration: line-through; }
   #print-area .receipt { border: 0; padding: 0; }
 }
 
-@media (max-width: 900px) {
+/* ---------- iPad / touch ---------- */
+.user-chip .short { display: none; }
+@media (max-width: 1100px) { .user-chip .short { display: inline; } }
+html { -webkit-text-size-adjust: 100%; }
+button, a, .menu-tile, .cat { touch-action: manipulation; -webkit-tap-highlight-color: transparent; }
+.menu-tile, .cat, .seg button, .tabs button, .nav a { -webkit-user-select: none; user-select: none; }
+.pos { height: calc(100dvh - var(--topbar-h)); }
+.modal { max-height: calc(100dvh - 32px); }
+/* โหมดแอปบนหน้าจอโฮม: เว้นพื้นที่แถบสถานะและแถบโฮม */
+.topbar { padding-top: env(safe-area-inset-top); height: calc(60px + env(safe-area-inset-top)); }
+:root { --topbar-h: calc(60px + env(safe-area-inset-top)); }
+.cart-foot { padding-bottom: calc(14px + env(safe-area-inset-bottom)); }
+/* จอสัมผัส: ปุ่มใหญ่ขึ้น, ไม่ค้างสถานะ hover */
+@media (hover: none) {
+  .menu-tile:hover { border-color: var(--border); }
+  .btn:hover { background: var(--surface); }
+  .btn.primary:hover { filter: none; }
+  .stepper button { width: 40px; height: 40px; font-size: 18px; }
+  .btn.sm { padding: 8px 12px; }
+  .link { padding: 6px 0; font-size: 14px; }
+}
+
+/* iPad แนวตั้ง / จอกลาง: ยังแบ่งซ้าย-ขวา แต่ตะกร้าแคบลง */
+@media (max-width: 1100px) {
+  .pos { grid-template-columns: 1fr 330px; }
+  .menu-grid { grid-template-columns: repeat(auto-fill, minmax(140px, 1fr)); }
+  .user-chip .uname, .user-chip .lbl, .topbar .logo { display: none; }
+  .nav a { padding: 8px 10px; }
+  .topbar { gap: 10px; }
+}
+
+/* iPad mini แนวตั้ง */
+@media (max-width: 800px) {
+  .pos { grid-template-columns: 1fr 300px; }
+  .nav a { padding: 8px 7px; }
+  .badge.admin { display: none; }
+}
+
+/* มือถือ: ซ้อนตะกร้าไว้ด้านล่าง */
+@media (max-width: 700px) {
   .pos { grid-template-columns: 1fr; height: auto; }
   .cart { border-left: 0; border-top: 1px solid var(--border); }
   .cart-items { max-height: 50vh; }
   .grid-2 { grid-template-columns: 1fr; }
-  .topbar { flex-wrap: wrap; height: auto; padding: 8px 16px; gap: 8px; }
+  .topbar { flex-wrap: wrap; height: auto; padding: calc(8px + env(safe-area-inset-top)) 16px 8px; gap: 8px; }
   .page { padding: 16px; }
   .bar-row { grid-template-columns: 70px 1fr 90px; }
+}
+@media (max-width: 900px) {
+  .grid-2 { grid-template-columns: 1fr; }
 }

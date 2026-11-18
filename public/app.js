@@ -95,10 +95,10 @@ function render() {
       <nav class="nav">${links}</nav>
       <span class="spacer"></span>
       <div class="user-chip">
-        <span>${esc(state.user.display_name)}</span>
+        <span class="uname">${esc(state.user.display_name)}</span>
         <span class="badge ${state.user.role === 'admin' ? 'admin' : ''}">${state.user.role === 'admin' ? 'Admin' : 'Staff'}</span>
-        <button class="btn sm" id="btn-pw">เปลี่ยนรหัส</button>
-        <button class="btn sm" id="btn-logout">ออกจากระบบ</button>
+        <button class="btn sm" id="btn-pw" title="เปลี่ยนรหัสผ่าน">🔑<span class="lbl">เปลี่ยนรหัส</span></button>
+        <button class="btn sm" id="btn-logout" title="ออกจากระบบ"><span class="lbl">ออกจากระบบ</span><span class="short">ออก</span></button>
       </div>
     </header>
     <main id="view"></main>`;
