@@ -1,0 +1,19 @@
+{
+  "name": "pos",
+  "version": "1.0.0",
+  "private": true,
+  "description": "ระบบ POS ร้านอาหาร",
+  "main": "server.js",
+  "type": "module",
+  "scripts": {
+    "start": "node server.js",
+    "dev": "node --watch server.js"
+  },
+  "engines": {
+    "node": ">=22.13"
+  },
+  "dependencies": {
+    "express": "^5.3.0",
+    "qrcode": "^1.5.4"
+  }
+}

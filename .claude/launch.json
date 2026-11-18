@@ -1,0 +1,6 @@
+{
+  "version": "0.0.1",
+  "configurations": [
+    { "name": "pos", "runtimeExecutable": "/Users/pacharapinyopornpanich/.nvm/versions/node/v24.22.1/bin/node", "runtimeArgs": ["server.js"], "port": 3000 }
+  ]
+}
