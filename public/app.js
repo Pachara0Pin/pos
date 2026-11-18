@@ -1,4 +1,6 @@
 // ===== ระบบ POS ร้านอาหาร (frontend) =====
+import { backend } from './backend.js';
+
 const $app = document.getElementById('app');
 const $modal = document.getElementById('modal-root');
 const $toast = document.getElementById('toast');
@@ -24,37 +26,20 @@ const todayStr = () => { const d = new Date(); return `${d.getFullYear()}-${Stri
 const ORDER_TYPE = { dine_in: 'ทานที่ร้าน', takeaway: 'กลับบ้าน' };
 const PAY = { cash: 'เงินสด', qr: 'สแกน QR' };
 
+// ทุกการเรียกข้อมูลผ่าน backend.js (Supabase) — error มี status / retryable เหมือนเดิม
 async function api(path, opts = {}) {
-  const ctrl = new AbortController();
-  const timer = setTimeout(() => ctrl.abort(), opts.timeout || 30000);
-  let res;
   try {
-    res = await fetch('/api' + path, {
-      method: opts.method || (opts.body ? 'POST' : 'GET'),
-      headers: opts.body ? { 'Content-Type': 'application/json' } : {},
-      body: opts.body ? JSON.stringify(opts.body) : undefined,
-      signal: ctrl.signal,
-    });
-  } catch {
-    const err = new Error('เชื่อมต่อเซิร์ฟเวอร์ไม่ได้ ตรวจสอบ Wi-Fi');
-    err.retryable = true;
-    throw err;
-  } finally {
-    clearTimeout(timer);
-  }
-  const data = await res.json().catch(() => ({}));
-  if (res.status === 401 && path !== '/login') { state.user = null; render(); }
-  if (!res.ok) {
-    const err = new Error(data.error || 'เกิดข้อผิดพลาด');
-    err.status = res.status;
-    err.retryable = [502, 503, 504].includes(res.status);
+    return await backend(path, opts);
+  } catch (err) {
+    if (err.status === 401 && path !== '/login' && path !== '/me') { state.user = null; render(); }
     throw err;
   }
-  return data;
 }
+// ออกจากระบบจากที่อื่น (token หมดอายุ / แท็บอื่น) → กลับหน้าเข้าสู่ระบบ
+window.addEventListener('pos:signed-out', () => { if (state.user) { state.user = null; render(); } });
 
 const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
-// ไม่ใช้ crypto.randomUUID เพราะใช้ไม่ได้บนหน้า http:// (iPad เปิดผ่าน IP ในร้าน)
+// ไม่ใช้ crypto.randomUUID เพราะใช้ได้เฉพาะหน้า https/localhost
 const newRequestId = () => Array.from(crypto.getRandomValues(new Uint8Array(16)), (b) => b.toString(16).padStart(2, '0')).join('');
 
 let toastTimer;
@@ -676,9 +661,9 @@ async function renderUsers(view) {
         <td class="row" style="flex-wrap:nowrap"><button class="btn sm" data-edit="${u.id}">แก้ไข/รีเซ็ตรหัส</button>
         ${u.id !== state.user.id ? `<button class="btn sm danger" data-del="${u.id}">ลบ</button>` : ''}</td></tr>`).join('')}
       </tbody></table>`;
-    list.querySelectorAll('[data-edit]').forEach((b) => (b.onclick = () => userForm(users.find((u) => u.id === Number(b.dataset.edit)))));
+    list.querySelectorAll('[data-edit]').forEach((b) => (b.onclick = () => userForm(users.find((u) => String(u.id) === b.dataset.edit))));
     list.querySelectorAll('[data-del]').forEach((b) => (b.onclick = async () => {
-      const u = users.find((x) => x.id === Number(b.dataset.del));
+      const u = users.find((x) => String(x.id) === b.dataset.del);
       if (!(await confirmBox(`ลบบัญชี "${u.username}"? ผู้ใช้นี้จะเข้าสู่ระบบไม่ได้อีก`, 'ลบบัญชี'))) return;
       try { await api('/users/' + u.id, { method: 'DELETE' }); toast('ลบบัญชีแล้ว'); renderUsers(view); } catch (e) { fail(e); }
     }));

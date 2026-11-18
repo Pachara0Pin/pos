@@ -2,20 +2,17 @@
   "name": "pos",
   "version": "1.0.0",
   "private": true,
-  "description": "ระบบ POS ร้านอาหาร (Supabase)",
-  "main": "server.js",
+  "description": "ระบบ POS ร้านอาหาร (GitHub Pages + Supabase)",
   "type": "module",
   "scripts": {
-    "start": "node server.js",
-    "dev": "node --watch server.js",
-    "migrate": "node scripts/migrate-sqlite.js"
+    "dev": "python3 -m http.server 5500 -d public --bind 127.0.0.1",
+    "db-check": "node scripts/db-check.js",
+    "migrate-users": "node scripts/migrate-users.js"
   },
   "engines": {
     "node": ">=22.13"
   },
   "dependencies": {
-    "express": "^5.3.0",
-    "pg": "^8.23.1",
-    "qrcode": "^1.5.4"
+    "pg": "^8.23.1"
   }
 }
