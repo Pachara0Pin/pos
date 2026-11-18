@@ -96,36 +96,82 @@ app.post('/api/me/password', requireLogin, wrap(async (req, res) => {
 }));
 
 // ---------- menu ----------
+const MENU_SELECT = `SELECT m.*, k.name AS kitchen_name FROM menu_items m LEFT JOIN kitchens k ON k.id = m.kitchen_id`;
+
 app.get('/api/menu', requireLogin, wrap(async (req, res) => {
-  const rows = await db.all('SELECT * FROM menu_items ORDER BY category, name');
+  const rows = await db.all(`${MENU_SELECT} ORDER BY m.category, m.name`);
   res.json(req.user.role === 'admin' ? rows : rows.filter((r) => r.available));
 }));
 
-function validateMenu(body) {
+async function validateMenu(body, current) {
   const name = String(body.name || '').trim();
   const category = String(body.category || '').trim() || 'ทั่วไป';
   const price = Number(body.price);
   if (!name) bad('กรุณาใส่ชื่อรายการ');
   if (!Number.isFinite(price) || price < 0) bad('ราคาไม่ถูกต้อง');
-  return { name, category, price: money(price), available: body.available === false || body.available === 0 ? 0 : 1 };
+  // ไม่ส่ง kitchen_id มา = คงครัวเดิม, ส่ง null/'' = ไม่ระบุครัว
+  let kitchen_id = 'kitchen_id' in body ? body.kitchen_id : current?.kitchen_id ?? null;
+  if (kitchen_id === '' || kitchen_id === null || kitchen_id === undefined) kitchen_id = null;
+  else {
+    kitchen_id = Number(kitchen_id);
+    if (!Number.isInteger(kitchen_id) || !(await db.one('SELECT 1 FROM kitchens WHERE id = ?', [kitchen_id]))) bad('ไม่พบครัวที่เลือก');
+  }
+  return { name, category, price: money(price), available: body.available === false || body.available === 0 ? 0 : 1, kitchen_id };
 }
 
 app.post('/api/menu', requireAdmin, wrap(async (req, res) => {
-  const m = validateMenu(req.body || {});
-  res.json(await db.one('INSERT INTO menu_items (name, category, price, available, created_at) VALUES (?,?,?,?,?) RETURNING *',
-    [m.name, m.category, m.price, m.available, nowLocal()]));
+  const m = await validateMenu(req.body || {});
+  const { id } = await db.one('INSERT INTO menu_items (name, category, price, available, kitchen_id, created_at) VALUES (?,?,?,?,?,?) RETURNING id',
+    [m.name, m.category, m.price, m.available, m.kitchen_id, nowLocal()]);
+  res.json(await db.one(`${MENU_SELECT} WHERE m.id = ?`, [id]));
 }));
 
 app.put('/api/menu/:id', requireAdmin, wrap(async (req, res) => {
-  const m = validateMenu(req.body || {});
-  const row = await db.one('UPDATE menu_items SET name=?, category=?, price=?, available=? WHERE id=? RETURNING *',
-    [m.name, m.category, m.price, m.available, Number(req.params.id)]);
-  if (!row) throw new HttpError(404, 'ไม่พบรายการ');
-  res.json(row);
+  const id = Number(req.params.id);
+  const current = await db.one('SELECT * FROM menu_items WHERE id = ?', [id]);
+  if (!current) throw new HttpError(404, 'ไม่พบรายการ');
+  const m = await validateMenu(req.body || {}, current);
+  await db.run('UPDATE menu_items SET name=?, category=?, price=?, available=?, kitchen_id=? WHERE id=?',
+    [m.name, m.category, m.price, m.available, m.kitchen_id, id]);
+  res.json(await db.one(`${MENU_SELECT} WHERE m.id = ?`, [id]));
 }));
 
 app.delete('/api/menu/:id', requireAdmin, wrap(async (req, res) => {
   await db.run('DELETE FROM menu_items WHERE id = ?', [Number(req.params.id)]);
+  res.json({ ok: true });
+}));
+
+// ---------- kitchens ----------
+app.get('/api/kitchens', requireLogin, wrap(async (_req, res) => {
+  res.json(await db.all(`SELECT k.*, (SELECT COUNT(*) FROM menu_items m WHERE m.kitchen_id = k.id) AS menu_count
+    FROM kitchens k ORDER BY k.name`));
+}));
+
+function kitchenName(body) {
+  const name = String(body?.name || '').trim().slice(0, 50);
+  if (!name) bad('กรุณาใส่ชื่อครัว');
+  return name;
+}
+
+app.post('/api/kitchens', requireAdmin, wrap(async (req, res) => {
+  const row = await db.one('INSERT INTO kitchens (name, created_at) VALUES (?,?) ON CONFLICT (name) DO NOTHING RETURNING *',
+    [kitchenName(req.body), nowLocal()]);
+  if (!row) bad('มีครัวชื่อนี้แล้ว');
+  res.json(row);
+}));
+
+app.put('/api/kitchens/:id', requireAdmin, wrap(async (req, res) => {
+  const name = kitchenName(req.body);
+  const id = Number(req.params.id);
+  if (await db.one('SELECT 1 FROM kitchens WHERE name = ? AND id <> ?', [name, id])) bad('มีครัวชื่อนี้แล้ว');
+  const row = await db.one('UPDATE kitchens SET name = ? WHERE id = ? RETURNING *', [name, id]);
+  if (!row) throw new HttpError(404, 'ไม่พบครัว');
+  res.json(row);
+}));
+
+app.delete('/api/kitchens/:id', requireAdmin, wrap(async (req, res) => {
+  // เมนูที่อยู่ในครัวนี้จะกลายเป็น "ไม่ระบุครัว" (ON DELETE SET NULL)
+  await db.run('DELETE FROM kitchens WHERE id = ?', [Number(req.params.id)]);
   res.json({ ok: true });
 }));
 
@@ -246,13 +292,16 @@ app.post('/api/orders', requireLogin, wrap(async (req, res) => {
   const order_type = b.order_type === 'takeaway' ? 'takeaway' : b.order_type === 'dine_in' ? 'dine_in' : bad('กรุณาเลือกทานที่ร้านหรือกลับบ้าน');
 
   const ids = [...new Set(b.items.map((it) => Number(it.menu_item_id)).filter(Number.isInteger))];
-  const menu = new Map((await db.all('SELECT * FROM menu_items WHERE id = ANY(?)', [ids])).map((m) => [m.id, m]));
+  const menu = new Map((await db.all(`${MENU_SELECT} WHERE m.id = ANY(?)`, [ids])).map((m) => [m.id, m]));
   const lines = b.items.map((it) => {
     const m = menu.get(Number(it.menu_item_id));
     if (!m || !m.available) bad('มีรายการที่ไม่พร้อมขาย กรุณาตรวจสอบ');
     const qty = Math.floor(Number(it.qty));
     if (!(qty > 0 && qty <= 999)) bad('จำนวนไม่ถูกต้อง');
-    return { menu_item_id: m.id, name: m.name, price: m.price, qty, note: String(it.note || '').slice(0, 200), line_total: money(m.price * qty) };
+    return {
+      menu_item_id: m.id, name: m.name, price: m.price, qty, note: String(it.note || '').slice(0, 200),
+      line_total: money(m.price * qty), kitchen_id: m.kitchen_id, kitchen_name: m.kitchen_name,
+    };
   });
   const subtotal = money(lines.reduce((s, l) => s + l.line_total, 0));
   const discount = money(Math.min(Math.max(Number(b.discount) || 0, 0), subtotal));
@@ -290,9 +339,9 @@ app.post('/api/orders', requireLogin, wrap(async (req, res) => {
       subtotal, discount, total, b.payment_method, payment_account_name, cash_received, change_amount,
       req.user.id, req.user.display_name, createdAt, requestId]);
     // ใส่ทุกรายการในคำสั่งเดียว (ฐานข้อมูลอยู่ไกล ลดจำนวนรอบการเรียก)
-    const items = await t.all(`INSERT INTO order_items (order_id, menu_item_id, name, price, qty, note, line_total)
-      VALUES ${lines.map(() => '(?,?,?,?,?,?,?)').join(', ')} RETURNING *`,
-    lines.flatMap((l) => [o.id, l.menu_item_id, l.name, l.price, l.qty, l.note, l.line_total]));
+    const items = await t.all(`INSERT INTO order_items (order_id, menu_item_id, name, price, qty, note, line_total, kitchen_id, kitchen_name)
+      VALUES ${lines.map(() => '(?,?,?,?,?,?,?,?,?)').join(', ')} RETURNING *`,
+    lines.flatMap((l) => [o.id, l.menu_item_id, l.name, l.price, l.qty, l.note, l.line_total, l.kitchen_id, l.kitchen_name]));
     return { ...o, items: items.sort((x, y) => x.id - y.id) };
   }, { retries: requestId ? 2 : 0 });
   res.json(order);

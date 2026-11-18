@@ -7,6 +7,7 @@ const state = {
   user: null,
   menu: [],
   accounts: [],
+  kitchens: [],
   cart: [], // { menu_item_id, name, price, qty, note }
   orderType: 'dine_in',
   tableNo: '',
@@ -66,8 +67,11 @@ function toast(msg, isErr = false) {
 }
 const fail = (e) => toast(e.message, true);
 
-function openModal(html, { wide = false, onMount } = {}) {
+let modalOnClose = null;
+function openModal(html, { wide = false, onMount, onClose } = {}) {
+  modalOnClose = null;
   $modal.innerHTML = `<div class="modal-backdrop"><div class="modal ${wide ? 'wide' : ''}" role="dialog" aria-modal="true">${html}</div></div>`;
+  modalOnClose = onClose || null;
   const back = $modal.firstElementChild;
   back.addEventListener('mousedown', (e) => { if (e.target === back) closeModal(); });
   $modal.querySelectorAll('[data-close]').forEach((b) => b.addEventListener('click', closeModal));
@@ -75,7 +79,12 @@ function openModal(html, { wide = false, onMount } = {}) {
   if (first) setTimeout(() => first.focus(), 30);
   onMount?.($modal.querySelector('.modal'));
 }
-function closeModal() { $modal.innerHTML = ''; }
+function closeModal() {
+  const cb = modalOnClose;
+  modalOnClose = null;
+  $modal.innerHTML = '';
+  cb?.();
+}
 document.addEventListener('keydown', (e) => { if (e.key === 'Escape') closeModal(); });
 
 function confirmBox(message, okText = 'ยืนยัน') {
@@ -419,12 +428,72 @@ function printReceipt(o) {
   window.print();
 }
 
+// ---------- ใบสั่งอาหารแยกตามครัว ----------
+const NO_KITCHEN = 'ไม่ระบุครัว';
+
+/** จัดกลุ่มรายการในบิลตามครัว (ใช้ครัว ณ ตอนขายที่บันทึกไว้ในบิล) */
+function kitchenGroups(o) {
+  const groups = new Map();
+  for (const it of o.items) {
+    const key = it.kitchen_name || NO_KITCHEN;
+    if (!groups.has(key)) groups.set(key, []);
+    groups.get(key).push(it);
+  }
+  return [...groups.entries()]
+    .sort(([a], [b]) => (a === NO_KITCHEN) - (b === NO_KITCHEN) || a.localeCompare(b, 'th'))
+    .map(([kitchen, items]) => ({ kitchen, items, qty: items.reduce((s, i) => s + i.qty, 0) }));
+}
+
+function kitchenTicketHTML(o, g, index, count) {
+  return `<div class="ticket">
+    <div class="t-kitchen">${esc(g.kitchen)}</div>
+    <div class="t-type">${o.order_type === 'takeaway' ? '🛍 กลับบ้าน' : '🍽 ทานที่ร้าน'}${o.table_no ? ' · โต๊ะ ' + esc(o.table_no) : ''}</div>
+    <div class="t-meta"><span>บิล ${esc(o.order_no.slice(-4))}</span><span>${esc(o.created_at.slice(11, 16))}</span><span>ใบ ${index + 1}/${count}</span></div>
+    ${o.status === 'void' ? '<div class="t-void">*** ยกเลิกบิล ***</div>' : ''}
+    <hr>
+    ${g.items.map((i) => `<div class="t-line"><span class="t-qty">${i.qty}</span><span class="t-name">${esc(i.name)}${i.note ? `<span class="t-note">» ${esc(i.note)}</span>` : ''}</span></div>`).join('')}
+    <hr>
+    <div class="t-foot">รวม ${g.qty} ที่ · ${esc(o.staff_name || '')}</div>
+  </div>`;
+}
+
+function printKitchenTickets(o, onlyKitchen) {
+  const groups = kitchenGroups(o);
+  const html = groups
+    .map((g, i) => (onlyKitchen && g.kitchen !== onlyKitchen ? '' : kitchenTicketHTML(o, g, i, groups.length)))
+    .join('');
+  document.getElementById('print-area').innerHTML = html;
+  window.print();
+}
+
+// ตั้งค่าเฉพาะเครื่อง: พิมพ์ใบสั่งครัวอัตโนมัติหลังคิดเงิน (ค่าเริ่มต้น: เปิด)
+const AUTO_KEY = 'pos.autoKitchenPrint';
+const autoKitchenPrint = {
+  get() { try { return localStorage.getItem(AUTO_KEY) !== '0'; } catch { return true; } },
+  set(on) { try { localStorage.setItem(AUTO_KEY, on ? '1' : '0'); } catch { /* ไม่มี storage: ใช้ค่าเริ่มต้น */ } },
+};
+
 function receiptModal(o, { fresh = true } = {}) {
+  const groups = kitchenGroups(o);
   openModal(`${fresh ? `<h3 style="color:var(--ok)">✓ ชำระเงินสำเร็จ</h3>` : `<h3>บิล ${esc(o.order_no)}</h3>`}
     ${fresh && o.payment_method === 'cash' ? `<div class="change-box">เงินทอน ${baht(o.change_amount)}</div>` : ''}
-    ${receiptHTML(o)}
+    <div class="kitchen-box">
+      <div class="row"><b>ใบสั่งอาหาร (${groups.length} ครัว)</b><span class="spacer"></span>
+        <button class="btn primary" id="k-print-all">🖨 พิมพ์ใบสั่งครัว</button></div>
+      <div class="kitchen-chips">${groups.map((g) => `<button class="btn sm" data-kprint="${esc(g.kitchen)}" title="พิมพ์เฉพาะ ${esc(g.kitchen)}">
+        ${esc(g.kitchen)} <span class="muted">· ${g.qty}</span></button>`).join('')}</div>
+      <label class="row muted" style="font-size:14px"><input type="checkbox" id="k-auto" ${autoKitchenPrint.get() ? 'checked' : ''}> พิมพ์ใบสั่งครัวอัตโนมัติหลังคิดเงิน (เครื่องนี้)</label>
+    </div>
+    <details><summary class="muted">ดูใบเสร็จ</summary>${receiptHTML(o)}</details>
     <div class="row"><button class="btn" id="r-print">🖨 พิมพ์ใบเสร็จ</button><span class="spacer"></span><button class="btn primary" data-close>${fresh ? 'บิลถัดไป' : 'ปิด'}</button></div>`,
-  { onMount: (m) => (m.querySelector('#r-print').onclick = () => printReceipt(o)) });
+  { onMount: (m) => {
+    m.querySelector('#r-print').onclick = () => printReceipt(o);
+    m.querySelector('#k-print-all').onclick = () => printKitchenTickets(o);
+    m.querySelectorAll('[data-kprint]').forEach((b) => (b.onclick = () => printKitchenTickets(o, b.dataset.kprint)));
+    m.querySelector('#k-auto').onchange = (e) => autoKitchenPrint.set(e.target.checked);
+    // ออกใบสั่งครัวทันทีหลังคิดเงิน (ถ้าเบราว์เซอร์ไม่เปิดหน้าพิมพ์เอง ให้กดปุ่มด้านบน)
+    if (fresh && autoKitchenPrint.get()) setTimeout(() => printKitchenTickets(o), 300);
+  } });
 }
 
 // ---------- orders today ----------
@@ -460,23 +529,30 @@ async function renderOrders(view, date = todayStr()) {
 }
 
 // ---------- admin: menu ----------
+const kitchenOptions = (selectedId) => `<option value="">— ไม่ระบุครัว —</option>${state.kitchens
+  .map((k) => `<option value="${k.id}" ${k.id === selectedId ? 'selected' : ''}>${esc(k.name)}</option>`).join('')}`;
+
 async function renderMenuAdmin(view) {
   view.innerHTML = `<div class="page">
-    <div class="page-head"><h2>จัดการเมนู</h2><span class="spacer"></span><button class="btn primary" id="m-add">+ เพิ่มรายการ</button></div>
+    <div class="page-head"><h2>จัดการเมนู</h2><span class="spacer"></span>
+      <button class="btn" id="m-kitchens">🍳 จัดการครัว</button>
+      <button class="btn primary" id="m-add">+ เพิ่มรายการ</button></div>
     <div class="card table-wrap" id="m-list"><div class="muted">กำลังโหลด...</div></div></div>`;
   view.querySelector('#m-add').onclick = () => menuForm();
+  view.querySelector('#m-kitchens').onclick = () => kitchensModal();
   try {
-    state.menu = await api('/menu');
+    [state.menu, state.kitchens] = await Promise.all([api('/menu'), api('/kitchens')]);
     const list = view.querySelector('#m-list');
-    list.innerHTML = state.menu.length ? `<table><thead><tr><th>ชื่อรายการ</th><th>หมวดหมู่</th><th class="right">ราคา (บาท)</th><th>สถานะ</th><th></th></tr></thead><tbody>
+    list.innerHTML = state.menu.length ? `<table><thead><tr><th>ชื่อรายการ</th><th>หมวดหมู่</th><th>ครัว</th><th class="right">ราคา (บาท)</th><th>สถานะ</th><th></th></tr></thead><tbody>
       ${state.menu.map((m) => `<tr>
         <td><b>${esc(m.name)}</b></td><td>${esc(m.category)}</td>
+        <td><select class="input kitchen-select" data-kitchen="${m.id}" aria-label="ครัวของ ${esc(m.name)}">${kitchenOptions(m.kitchen_id)}</select></td>
         <td class="right"><input class="input price-input num" type="number" min="0" step="0.01" value="${m.price}" data-price="${m.id}" title="แก้ราคาแล้วกด Enter"></td>
         <td><button class="badge ${m.available ? 'ok' : 'off'}" data-toggle="${m.id}" style="cursor:pointer">${m.available ? 'พร้อมขาย' : 'หมด/ปิดขาย'}</button></td>
         <td class="row" style="flex-wrap:nowrap"><button class="btn sm" data-edit="${m.id}">แก้ไข</button><button class="btn sm danger" data-del="${m.id}">ลบ</button></td>
       </tr>`).join('')}</tbody></table>` : '<div class="muted">ยังไม่มีรายการ</div>';
     const find = (id) => state.menu.find((m) => m.id === Number(id));
-    const save = async (m, patch) => { await api('/menu/' + m.id, { method: 'PUT', body: { ...m, ...patch } }); };
+    const save = (m, patch) => api('/menu/' + m.id, { method: 'PUT', body: { ...m, ...patch } });
     list.querySelectorAll('[data-price]').forEach((inp) => {
       const commit = async () => {
         const m = find(inp.dataset.price);
@@ -488,6 +564,15 @@ async function renderMenuAdmin(view) {
       inp.onkeydown = (e) => { if (e.key === 'Enter') inp.blur(); };
       inp.onchange = commit;
     });
+    list.querySelectorAll('[data-kitchen]').forEach((sel) => (sel.onchange = async () => {
+      const m = find(sel.dataset.kitchen);
+      const kitchen_id = sel.value ? Number(sel.value) : null;
+      try {
+        const saved = await save(m, { kitchen_id });
+        Object.assign(m, saved);
+        toast(`${m.name} → ${saved.kitchen_name || 'ไม่ระบุครัว'}`);
+      } catch (e) { fail(e); sel.value = m.kitchen_id ?? ''; }
+    }));
     list.querySelectorAll('[data-toggle]').forEach((b) => (b.onclick = async () => {
       const m = find(b.dataset.toggle);
       try { await save(m, { available: !m.available }); renderMenuAdmin(view); } catch (e) { fail(e); }
@@ -508,18 +593,71 @@ function menuForm(item) {
       <label class="field">ชื่อรายการ<input class="input" name="name" required value="${esc(item?.name)}"></label>
       <label class="field">หมวดหมู่<input class="input" name="category" list="cat-list" placeholder="เช่น อาหารจานเดียว" value="${esc(item?.category)}">
         <datalist id="cat-list">${cats.map((c) => `<option value="${esc(c)}">`).join('')}</datalist></label>
+      <label class="field">ครัวที่ทำ (ใช้แยกใบสั่งอาหาร)<select class="input" name="kitchen_id">${kitchenOptions(item?.kitchen_id ?? null)}</select></label>
       <label class="field">ราคา (บาท)<input class="input" name="price" type="number" min="0" step="0.01" required value="${item?.price ?? ''}"></label>
       <label class="row"><input type="checkbox" name="available" ${!item || item.available ? 'checked' : ''}> พร้อมขาย</label>
       <div class="row"><span class="spacer"></span><button type="button" class="btn" data-close>ยกเลิก</button><button class="btn primary">บันทึก</button></div>
     </form>`, { onMount: (m) => (m.querySelector('form').onsubmit = async (e) => {
     e.preventDefault();
     const f = e.target;
-    const body = { name: f.name.value, category: f.category.value, price: Number(f.price.value), available: f.available.checked };
+    const body = {
+      name: f.name.value, category: f.category.value, price: Number(f.price.value), available: f.available.checked,
+      kitchen_id: f.kitchen_id.value ? Number(f.kitchen_id.value) : null,
+    };
     try {
       await api(item ? '/menu/' + item.id : '/menu', { method: item ? 'PUT' : 'POST', body });
       toast('บันทึกแล้ว'); closeModal(); renderMenuAdmin(document.getElementById('view'));
     } catch (err) { fail(err); }
   }) });
+}
+
+// ---------- admin: kitchens ----------
+function kitchensModal() {
+  const draw = (m) => {
+    const box = m.querySelector('#k-list');
+    box.innerHTML = state.kitchens.length ? `<table><tbody>${state.kitchens.map((k) => `<tr>
+        <td><input class="input" value="${esc(k.name)}" data-kname="${k.id}" maxlength="50" aria-label="ชื่อครัว"></td>
+        <td class="muted" style="white-space:nowrap">${k.menu_count} เมนู</td>
+        <td><button class="btn sm danger" data-kdel="${k.id}">ลบ</button></td></tr>`).join('')}</tbody></table>`
+      : '<div class="muted">ยังไม่มีครัว — เพิ่มด้านล่าง เช่น "ครัว 1", "ครัวเครื่องดื่ม"</div>';
+    box.querySelectorAll('[data-kname]').forEach((inp) => {
+      inp.onkeydown = (e) => { if (e.key === 'Enter') inp.blur(); };
+      inp.onchange = async () => {
+        const k = state.kitchens.find((x) => x.id === Number(inp.dataset.kname));
+        try { const saved = await api('/kitchens/' + k.id, { method: 'PUT', body: { name: inp.value } }); k.name = saved.name; toast('เปลี่ยนชื่อครัวแล้ว'); }
+        catch (e) { fail(e); inp.value = k.name; }
+      };
+    });
+    box.querySelectorAll('[data-kdel]').forEach((b) => (b.onclick = async () => {
+      const k = state.kitchens.find((x) => x.id === Number(b.dataset.kdel));
+      const msg = k.menu_count ? `ลบ "${k.name}"? เมนู ${k.menu_count} รายการในครัวนี้จะกลายเป็น "ไม่ระบุครัว"` : `ลบ "${k.name}"?`;
+      if (!confirm(msg)) return;
+      try { await api('/kitchens/' + k.id, { method: 'DELETE' }); state.kitchens = await api('/kitchens'); draw(m); toast('ลบครัวแล้ว'); }
+      catch (e) { fail(e); }
+    }));
+  };
+  openModal(`<h3>จัดการครัว</h3>
+    <div class="muted" style="font-size:14px">หลังคิดเงิน ระบบจะออกใบสั่งอาหารแยกตามครัวของแต่ละเมนู</div>
+    <div class="table-wrap" id="k-list"></div>
+    <form class="row" id="k-add" style="flex-wrap:nowrap"><input class="input" name="name" placeholder="ชื่อครัวใหม่ เช่น ครัว 1" maxlength="50" required>
+      <button class="btn primary" style="white-space:nowrap">+ เพิ่มครัว</button></form>
+    <div class="row"><span class="spacer"></span><button class="btn" data-close>เสร็จ</button></div>`, {
+    onMount: (m) => {
+      draw(m);
+      m.querySelector('#k-add').onsubmit = async (e) => {
+        e.preventDefault();
+        try {
+          await api('/kitchens', { body: { name: e.target.name.value } });
+          e.target.reset();
+          state.kitchens = await api('/kitchens');
+          draw(m);
+          toast('เพิ่มครัวแล้ว');
+        } catch (err) { fail(err); }
+      };
+    },
+    // ปิดหน้าต่าง (ปุ่ม/แตะข้างนอก/Esc) แล้วโหลดตารางเมนูใหม่ เพราะตัวเลือกครัวเปลี่ยน
+    onClose: () => renderMenuAdmin(document.getElementById('view')),
+  });
 }
 
 // ---------- admin: users ----------

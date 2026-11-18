@@ -190,11 +190,35 @@ tr.void td { color: var(--muted); text-decoration: line-through; }
 }
 .toast.err { background: var(--danger); }
 
+/* ใบสั่งอาหารแยกครัว (หน้าจอ) */
+.kitchen-box { background: var(--primary-soft); border-radius: 12px; padding: 12px; display: grid; gap: 10px; }
+.kitchen-chips { display: flex; gap: 8px; flex-wrap: wrap; }
+details summary { cursor: pointer; padding: 4px 0; }
+details .receipt { margin-top: 8px; }
+.kitchen-select { min-width: 140px; padding: 6px 8px; }
+
+/* ใบสั่งอาหาร (พิมพ์): ตัวใหญ่ อ่านง่ายในครัว ไม่มีราคา */
+.ticket { font-family: 'Sarabun', sans-serif; color: #000; background: #fff; font-size: 15px; }
+.ticket .t-kitchen { font-size: 26px; font-weight: 700; text-align: center; border: 2px solid #000; border-radius: 6px; padding: 2px 0; }
+.ticket .t-type { font-size: 20px; font-weight: 700; text-align: center; margin-top: 6px; }
+.ticket .t-meta { display: flex; justify-content: space-between; font-size: 13px; margin-top: 4px; }
+.ticket .t-void { text-align: center; font-weight: 700; }
+.ticket hr { border: 0; border-top: 1px dashed #000; margin: 6px 0; }
+.ticket .t-line { display: flex; gap: 8px; font-size: 19px; font-weight: 600; padding: 3px 0; }
+.ticket .t-qty { min-width: 32px; text-align: right; font-weight: 700; }
+.ticket .t-qty::after { content: '×'; font-weight: 400; margin-left: 2px; }
+.ticket .t-name { flex: 1; }
+.ticket .t-note { display: block; font-size: 15px; font-weight: 400; }
+.ticket .t-foot { font-size: 13px; text-align: center; }
+
 #print-area { display: none; }
 @media print {
   body > *:not(#print-area) { display: none !important; }
   #print-area { display: block; width: 72mm; }
   #print-area .receipt { border: 0; padding: 0; }
+  /* แต่ละครัวขึ้นหน้าใหม่ (เครื่องพิมพ์ใบเสร็จจะตัดกระดาษแยกให้) */
+  #print-area .ticket { break-after: page; page-break-after: always; }
+  #print-area .ticket:last-child { break-after: auto; page-break-after: auto; }
 }
 
 /* ---------- iPad / touch ---------- */
